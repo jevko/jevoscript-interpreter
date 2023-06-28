@@ -6,6 +6,14 @@ class Env {
       this.bindings = bindings
     }
   }
+  lookupenv(key) {
+    let env = this
+    while (env.bindings.has(key) === false) {
+      if (env.parent === null) return undefined
+      env = env.parent
+    }
+    return env
+  }
   lookup(key) {
     let env = this
     while (env.bindings.has(key) === false) {
@@ -31,68 +39,112 @@ class Tail {
   }
 }
 
+class Pair {
+  constructor(head, tail) {
+    this.head = head
+    this.tail = tail
+  }
+}
+
 const binding = (name, value) => [name, {
   binding: 'const',
   value
 }]
 
+const bind = (type) => (jevko, env) => {
+  const {subs} = jevko
+  const {length} = subs
+
+  // note: could also allow an "else" clause -- a value to return from let that is not bound to anything
+  if (length < 2 || length % 2 !== 0) throw Error(`${type} arity error!`)
+
+  let value
+  for (let i = 0; i < length; i += 2) {
+    const name = subtoname(subs[i])
+    value = evalsub(subs[i + 1], env)
+
+    if (env.bindings.has(name)) throw Error(`${type} can't redeclare variable: ${name}`)
+
+    env.bindings.set(name, {
+      binding: type,
+      value,
+    })
+  }
+
+  // return last value
+  return value
+}
+
 const topenv = new Env(null)
 topenv.bindings = new Map([
-  ['true', {
-    binding: 'const',
-    value: true
-  }],
-  ['false', {
-    binding: 'const',
-    value: false
-  }],
-  ['fn', {
-    binding: 'const',
-    value: (jevko, env) => {
-      const {subs, suffix} = jevko
-      const params = []
-      let body
-      if (subs.length === 0) {
-        // no params, body is {prefix: '', jevko}
-        body = {prefix: '', jevko}
+  binding('true', true),
+  binding('false', false),
+  binding('fn', (jevko, env) => {
+    const {subs, suffix} = jevko
+    const params = []
+    let body
+    if (subs.length === 0) {
+      // no params, body is {prefix: '', jevko}
+      body = {prefix: '', jevko}
+    }
+    else {
+      body = subs.at(-1)
+      for (let i = 0; i < subs.length - 1; ++i) {
+        params.push(subs[i])
       }
-      else {
-        body = subs.at(-1)
-        for (let i = 0; i < subs.length - 1; ++i) {
-          params.push(subs[i])
-        }
+    }
+    return new Fn(params, body, env)
+  }),
+  // todo: pick one fn
+  binding('fn2', (jevko, env) => {
+    const {subs, suffix} = jevko
+    const params = []
+    let body
+    if (subs.length === 0) {
+      // no params, body is {prefix: '', jevko}
+      body = {prefix: '', jevko}
+    }
+    else if (subs.length === 1) {
+      // no params, body is subs[0]
+      body = subs[0]
+    }
+    else {
+      {
+        const {jevko} = subs[0]
+        const {subs: ss, suffix} = jevko
+        if (ss.length === 0) params.push({prefix: '', jevko})
+        else params.push(...ss)
       }
-      return new Fn(params, body, env)
+      body = {prefix: '', jevko: {subs: subs.slice(1), suffix: ''}}
     }
-  }],
-  ['let', {
-    binding: 'const',
-    value: (jevko, env) => {
-      const {subs} = jevko
-      // for now allow only non-variadic let
-      if (subs.length !== 2) throw Error(`let arity error!`)
-      const name = subtoname(subs[0])
-      const value = evalsub(subs[1], env)
+    return new Fn(params, body, env)
+  }),
+  binding('const', bind('const')),
+  binding('let', bind('let')),
+  binding('set!', (jevko, env) => {
+    const {subs} = jevko
+    if (subs.length !== 2) throw Error(`set! arity error!`)
+    const name = subtoname(subs[0])
+    const value = evalsub(subs[1], env)
 
-      if (env.bindings.has(name)) throw Error('oops')
+    const e = env.lookupenv(name)
 
-      env.bindings.set(name, {
-        binding: 'let',
-        value,
-      })
+    if (e === undefined) throw Error(`set! unknown variable: ${name}`)
 
-      return value
-    }
-  }],
-  ['=', {
-    binding: 'const',
-    value: (jevko, env) => {
-      const {subs, suffix} = jevko
-      if (subs.length !== 2) throw Error('= arity error!')
-      const vals = evalargs(jevko, env)
-      return vals[0] === vals[1]
-    }
-  }],
+    const binding = e.bindings.get(name)
+
+    if (binding.binding !== 'let') throw Error(`set! can't change variable: ${name}`)
+
+    binding.value = value
+
+    return value
+  }),
+  binding('=', (jevko, env) => {
+    const {subs, suffix} = jevko
+    if (subs.length !== 2) throw Error('= arity error!')
+    const vals = evalargs(jevko, env)
+    return vals[0] === vals[1]
+  }),
   binding('+', (jevko, env) => {
     const {subs, suffix} = jevko
     if (subs.length !== 2) throw Error('+ arity error!')
@@ -112,20 +164,28 @@ topenv.bindings = new Map([
     // if (subs.length !== 2) throw Error('? arity error!')
     for (let i = 0; i < subs.length - 1; i += 2) {
       const condval = evalsub(subs[i], env)
+      // if (condval) return evalsub(subs[i + 1], env)
       if (condval) return new Tail(subs[i + 1], env)// evalsub(subs[i + 1], env)
     }
+    // return evalsub(subs.at(-1), env)
     return new Tail(subs.at(-1), env) // evalsub(subs.at(-1), env)
   }),
   binding('', (jevko, env) => {
     const {subs, suffix} = jevko
-    if (subs.length === 0) return evalsuf(jevko.suffix, env)
+    if (subs.length === 0) return evalsuf(suffix, env)
     return evalsubs(subs, env)
   }),
   binding('log', (jevko, env) => {
     const vals = evalargs(jevko, env)
     console.log(...vals)
     return vals.at(-1)
-  })
+  }),
+  binding('pair', (jevko, env) => {
+    const {subs} = jevko
+    if (subs.length !== 2) throw Error(`pair arity error!`)
+    const vals = evalargs(jevko, env)
+    return new Pair(vals[0], vals[1])
+  }),
 ])
 
 const subtoname = (sub) => {
@@ -139,32 +199,29 @@ const subtoname = (sub) => {
 
 const evalsub = (sub, env) => {
   // note: trampoline
-  let i = 0
   while (true) {
-    console.log('iter', i++)
     const {prefix, jevko} = sub
 
-    // console.log(env, prefix)
     const {value} = env.lookup(prefix)
   
+    let v
     if (value instanceof Fn) {
-      let v = evalfn(value, jevko, env)
-      if (v instanceof Tail) {
-        console.log('aaa', v)
-        sub = v.body
-        env = v.localenv
-        continue
-      }
-      console.log('VVV', v)
-      // while (v instanceof Tail) {
-      //   v = evalsub(v.body, v.localenv)
-      // }
-      return v
+      v = evalfn(value, jevko, env)
     }
-  
-    if (typeof value === 'function') {
-      return value(jevko, env)
+    else if (typeof value === 'function') {
+      v = value(jevko, env)
     }
+    else {
+      console.error(value, jevko, env)
+      throw Error('Unknown value')
+    }
+
+    if (v instanceof Tail) {
+      sub = v.body
+      env = v.localenv
+      continue
+    }
+    return v
   }
 }
 
@@ -244,11 +301,14 @@ const rename = (tree) => {
 }
 
 const evalsubs = (subs, env) => {
+  const localenv = new Env(env)
   let v
-  for (const sub of subs) {
-    v = evalsub(sub, env)
+  for (let i = 0; i < subs.length - 1; ++i) {
+    const sub = subs[i]
+    v = evalsub(sub, localenv)
   }
-  return v
+  return new Tail(subs.at(-1), localenv)
+  // return v
 }
 
 export const evaltop = (jevko) => {
@@ -258,17 +318,6 @@ export const evaltop = (jevko) => {
 
   if (subs.length === 0) return evalsuf(suffix, env)
 
-  let v
-  for (const sub of subs) {
-    v = evalsub(sub, env)
-  }
-  return v
+  let v = evalsubs(subs, env)
+  return evalsub(v.body, v.localenv)
 }
-
-// const evalsubtail = (sub, env) => {
-//   let v = evalsub(sub, env)
-//   while (v instanceof Tail) {
-//     v = evalsub(v.body, v.localenv)
-//   }
-//   return v
-// }
