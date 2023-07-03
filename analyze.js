@@ -25,6 +25,18 @@ class Env {
   }
 }
 
+class Aenv extends Env {
+  constructor(parent, bindings, isDeferred = false, top = null) {
+    super(parent, bindings)
+    this.isDeferred = isDeferred
+    // hacky
+    this.top = top ?? parent.top
+  }
+  defer(fn) {
+    this.top.deferred.push(fn)
+  }
+}
+
 class Fn {
   constructor(params, body, fnenv) {
     this.params = params
@@ -84,7 +96,7 @@ const abind = (type) => (jevko, aenv) => {
   }
 }
 
-const topaenv = new Env(null)
+const topaenv = new Aenv(null, null, false, 'hack')
 topaenv.bindings = new Map([
   abinding('true', true, 'const'),
   abinding('false', false, 'const'),
@@ -103,7 +115,7 @@ topaenv.bindings = new Map([
       body = analyzesub(subs[0], aenv)
     }
     else {
-      const localaenv = new Env(aenv)
+      const localaenv = new Aenv(aenv, null, true)
       {
         // todo:
         const {jevko} = subs[0]
@@ -111,6 +123,7 @@ topaenv.bindings = new Map([
         // for now support only named params, no ..., etc.
         if (ss.length === 0) {
           params.push(suffix)
+          // bind argument:
           localaenv.bindings.set(suffix, '*unbound*')
         }
         else for (const {prefix, jevko: {subs, suffix}} of ss) {
@@ -120,6 +133,7 @@ topaenv.bindings = new Map([
           // todo: validate suffix as id
           if (params.includes(suffix)) throw Error('oops')
           params.push(suffix)
+          // bind argument:
           localaenv.bindings.set(suffix, '*unbound*')
         }
       }
@@ -151,9 +165,7 @@ topaenv.bindings = new Map([
       }
     }
   }),
-  // todo: lexical analysis of bindings
   abinding('const', abind('const')),
-  // todo: lexical analysis of bindings
   abinding('let', abind('let')),
   abinding('set!', (jevko, aenv) => {
     const {subs} = jevko
@@ -176,26 +188,6 @@ topaenv.bindings = new Map([
       return value
     }
   }),
-  // abinding('=', (jevko, env) => {
-  //   const {subs, suffix} = jevko
-  //   if (subs.length !== 2) throw Error('= arity error!')
-  //   const vals = evalargs(jevko, env)
-  //   return vals[0] === vals[1]
-  // }),
-  // abinding('+', (jevko, env) => {
-  //   const {subs, suffix} = jevko
-  //   if (subs.length !== 2) throw Error('+ arity error!')
-  //   const vals = evalargs(jevko, env)
-  //   // console.log('*****', vals)
-  //   return vals[0] + vals[1]
-  // }),
-  // abinding('-', (jevko, env) => {
-  //   const {subs, suffix} = jevko
-  //   if (subs.length !== 2) throw Error('- arity error!')
-  //   const vals = evalargs(jevko, env)
-  //   // console.log('*****', vals)
-  //   return vals[0] - vals[1]
-  // }),
   abinding('?', (jevko, aenv) => {
     const {subs, suffix} = jevko
     if (subs.length < 2) throw Error('? arity error!')
@@ -227,26 +219,46 @@ topaenv.bindings = new Map([
     if (subs.length === 0) return analyzesuf(suffix, aenv)
     return analyzesubs(subs, aenv)
   }),
-  // abinding('=', '*unbound*'),
-  // abinding('-', '*unbound*'),
-  // abinding('+', '*unbound*'),
-  // ['=', '*unbound*'],
-  // ['-', '*unbound*'],
-  // ['+', '*unbound*'],
-  // ['log', '*unbound*'],
+  // todo:
+  ['log', '*todo*'],
+  abinding('=', (jevko, aenv) => {
+    const argfns = analyzeargs(jevko, aenv)
+    if (argfns.length !== 2) throw Error('= arity')
+    // todo: static type checking?
+    // would verify here that args are numbers
+    // aenv would contain type info
+    return (env) => {
+      const vals = argfnstoargs(argfns, env)
+      return vals[0] === vals[1]
+    }
+  }),
+  abinding('-', (jevko, aenv) => {
+    const argfns = analyzeargs(jevko, aenv)
+    if (argfns.length !== 2) throw Error('- arity')
+    // todo: static type checking?
+    // would verify here that args are numbers
+    // aenv would contain type info
+    return (env) => {
+      const vals = argfnstoargs(argfns, env)
+      return vals[0] - vals[1]
+    }
+  }),
+  ['+', {
+    binding: 'const',
+    // note: + optimized at analyze-time
+    value: (jevko, aenv) => {
+      const argfns = analyzeargs(jevko, aenv)
+      if (argfns.length !== 2) throw Error('+ arity')
+      // todo: static type checking?
+      // would verify here that args are numbers
+      // aenv would contain type info
+      return (env) => {
+        const vals = argfnstoargs(argfns, env)
+        return vals[0] + vals[1]
+      }
+    },
+  }],
   // ['', '*unbound*'],
-  // abinding('=', '*unbound*'),
-  // abinding('log', (jevko, env) => {
-  //   const vals = evalargs(jevko, env)
-  //   console.log(...vals)
-  //   return vals.at(-1)
-  // }),
-  // abinding('pair', (jevko, env) => {
-  //   const {subs} = jevko
-  //   if (subs.length !== 2) throw Error(`pair arity error!`)
-  //   const vals = evalargs(jevko, env)
-  //   return new Pair(vals[0], vals[1])
-  // }),
 ])
 
 const subtoname = (sub) => {
@@ -265,49 +277,43 @@ const analyzesub = (sub, aenv) => {
 
   const found = aenv.lookup(prefix)
 
-  const ret = env => {
-    const found = env.lookup(prefix)
+  const makeInvocaton = () => {
+    const argfns = analyzeargs(jevko, aenv)
+    return env => {
+      const found = env.lookup(prefix)
 
-    const {value} = found
-  
-    let v
-    if (typeof value === 'function') {
-      v = value(argfns, env)
+      const {value} = found
+
+      return value(argfns, env)
     }
-    // todo: move checking for unknown variables to aenv (analysis-time) and give an option to defer this to allow for [mutually] recursive functions
-    // this function will simply return value(args, env) without any checks then
+  }
+
+  if (found === undefined) {
+    // checking for unknown variables at analysis-time that allows for [mutually] recursive functions by deferring the checks to the last stage of analysis
+    if (aenv.isDeferred) {
+      aenv.defer(() => {
+        const found = aenv.lookup(prefix)
+        if (found === undefined) {
+          throw Error(`Unknown name: '${prefix}'`)
+        }
+        // todo: check arity, etc.
+      })
+      // note: assuming prefix refers to some value that is not yet visible
+      return makeInvocaton()
+    }
     else {
-      console.error(value, found, jevko, env)
-      throw Error('Unknown value')
+      throw Error(`Unknown name: '${prefix}'`)
     }
-
-    return v
   }
+  // todo: check arity, etc.
 
-  // console.log('SUB', sub)
-  let argfns // = analyzeargs(jevko, aenv)
-
-  if (found !== undefined) {
-    const {value, type} = found
-
-    // console.log('vvv', initialprefix, value, found)
-
-    if (found === '*unbound*') {
-      argfns = analyzeargs(jevko, aenv)
-      return ret
-    }
-
-    if (type === 'fn') {
-      // todo: break down a static construct
-      const x = value(jevko, aenv)
-
-      // ?
-      return x
-    }
+  const {value, type} = found
+  if (type === 'fn') {
+    // note: break down a static construct
+    return value(jevko, aenv)
   }
   
-  argfns = analyzeargs(jevko, aenv)
-  return ret
+  return makeInvocaton()
 }
 
 const analyzeargs = (jevko, aenv) => {
@@ -450,14 +456,35 @@ topenv.bindings = new Map([
 ])
 
 export const evaltop = (jevko) => {
-  const env = topenv
-  const aenv = topaenv
+  const aglobals = {
+    deferred: []
+  }
+
+  // analysis-time env:
+  const aenv = new Aenv(topaenv, undefined, false, aglobals)
+
+  // runtime env:
+  const env = new Env(topenv)
 
   const {subs, suffix} = jevko
 
-  if (subs.length === 0) return analyzesuf(suffix, aenv)(env)
+  if (subs.length === 0) {
+    const analyzed = analyzesuf(suffix, aenv)
+    
+    // run:
+    return analyzed(env)
+  }
 
-  let v = analyzesubs(subs, aenv)(env)
+  const analyzed = analyzesubs(subs, aenv)
+
+  const {deferred} = aglobals
+
+  for (const fn of deferred) {
+    fn()
+  }
+  
+  // run:
+  const v = analyzed(env)
   // console.log('topv', v, v.body.toString())
   return evaltail(v)
   // return v.body(v.localenv)
