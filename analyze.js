@@ -284,6 +284,8 @@ const analyzesub = (sub, aenv) => {
     if (typeof value === 'function') {
       v = value(argsfn, env)
     }
+    // todo: move checking for unknown variables to aenv (analysis-time) and give an option to defer this to allow for [mutually] recursive functions
+    // this function will simply return value(args, env) without any checks then
     else {
       console.error(value, found, jevko, env)
       throw Error('Unknown value')
@@ -387,6 +389,7 @@ const analyzesuf = (suf, aenv) => {
       return value 
     }
   }
+  // todo: option to defer this to allow for [mutually] recursive functions
   // note: analysis/compile-time checking of unbound variables
   //   aenv must keep track of local bindings
   else {
