@@ -136,9 +136,8 @@ topaenv.bindings = new Map([
 
       // return Fn(params, body, fnenv)
 
-      return (argsfn, env) => {
-        // console.log('arf', argsfn, env)
-        const argvals = argsfn(env)
+      return (argfns, env) => {
+        const argvals = argfnstoargs(argfns, env)
         // let's assume body is a single sub
         // const {params, body, fnenv} = fn
         // todo: move this check to static
@@ -260,29 +259,20 @@ const subtoname = (sub) => {
 }
 
 const analyzesub = (sub, aenv) => {
-  const {prefix: initialprefix, jevko} = sub
+  const {prefix, jevko} = sub
 
   // todo: validate prefix
 
-  const found = aenv.lookup(initialprefix)
+  const found = aenv.lookup(prefix)
 
   const ret = env => {
-    let argsfn = initialargsfn
-    let prefix = initialprefix
-
-    // console.log('revolution', initialprefix, i++)
     const found = env.lookup(prefix)
 
-    // console.log('OOOO', found, prefix, initialprefix)
     const {value} = found
   
     let v
-    // if (value instanceof Fn) {
-    //   v = evalfn(value, argsfn, env)
-    // }
-    // else 
     if (typeof value === 'function') {
-      v = value(argsfn, env)
+      v = value(argfns, env)
     }
     // todo: move checking for unknown variables to aenv (analysis-time) and give an option to defer this to allow for [mutually] recursive functions
     // this function will simply return value(args, env) without any checks then
@@ -295,7 +285,7 @@ const analyzesub = (sub, aenv) => {
   }
 
   // console.log('SUB', sub)
-  let initialargsfn // = analyzeargs(jevko, aenv)
+  let argfns // = analyzeargs(jevko, aenv)
 
   if (found !== undefined) {
     const {value, type} = found
@@ -303,7 +293,7 @@ const analyzesub = (sub, aenv) => {
     // console.log('vvv', initialprefix, value, found)
 
     if (found === '*unbound*') {
-      initialargsfn = analyzeargs(jevko, aenv)
+      argfns = analyzeargs(jevko, aenv)
       return ret
     }
 
@@ -315,10 +305,8 @@ const analyzesub = (sub, aenv) => {
       return x
     }
   }
-  // console.error(`|${initialprefix}|`)
-  // throw Error('testing')
   
-  initialargsfn = analyzeargs(jevko, aenv)
+  argfns = analyzeargs(jevko, aenv)
   return ret
 }
 
@@ -332,15 +320,7 @@ const analyzeargs = (jevko, aenv) => {
       argfns.push(analyzesub(sub, aenv))
     }
   }
-
-  // note: could also return argfns instead
-  return env => {
-    const argvals = []
-    for (const f of argfns) {
-      argvals.push(evaltail(f(env)))
-    }
-    return argvals
-  }
+  return argfns
 }
 
 /**
@@ -398,19 +378,6 @@ const analyzesuf = (suf, aenv) => {
   }
 }
 
-const evalfn = (fn, argsfn, env) => {
-  const argvals = argsfn(env)
-  // let's assume body is a single sub
-  const {params, body, fnenv} = fn
-  if (params.length !== argvals.length) {
-    throw Error(`Arity error! Expected ${params.length}, got ${argvals.length}!`)
-  }
-  const args = bindparams(params, argvals)
-  const localenv = new Env(fnenv, args)
-
-  return new Tail(body, localenv)
-}
-
 const analyzesubs = (subs, aenv) => {
   const analyzed = []
 
@@ -449,45 +416,33 @@ const binding = (name, value) => [name, {
   value
 }]
 
+const argfnstoargs = (argfns, env) => {
+  const ret = new Array(argfns.length)
+  for (let i = 0; i < argfns.length; ++i) {
+    ret[i] = evaltail(argfns[i](env))
+  }
+  return ret
+}
+
 const topenv = new Env(null)
 topenv.bindings = new Map([
   // todo: check arity for +, =, -, etc. statically
-  binding('=', (argsfn, env) => {
-    // const {subs, suffix} = jevko
-    // if (subs.length !== 2) throw Error('= arity error!')
-    const vals = argsfn(env)
-    // const vals = evalargs(jevko, env)
+  binding('=', (argfns, env) => {
+    const vals = argfnstoargs(argfns, env)
     return vals[0] === vals[1]
   }),
-  binding('+', (argsfn, env) => {
-    // const {subs, suffix} = jevko
-    // if (subs.length !== 2) throw Error('+ arity error!')
-    // const vals = evalargs(jevko, env)
-    const vals = argsfn(env)
-    // console.log('VALS', vals)
-    // console.log('*****', vals)
+  binding('+', (argfns, env) => {
+    const vals = argfnstoargs(argfns, env)
     return vals[0] + vals[1]
   }),
-  binding('-', (argsfn, env) => {
-    // const {subs, suffix} = jevko
-    // if (subs.length !== 2) throw Error('- arity error!')
-    // const vals = evalargs(jevko, env)
-    const vals = argsfn(env)
-    // console.log('*****', vals)
+  binding('-', (argfns, env) => {
+    const vals = argfnstoargs(argfns, env)
     return vals[0] - vals[1]
   }),
-  binding('log', (argsfn, env) => {
-    // const vals = evalargs(jevko, env)
-    const vals = argsfn(env)
+  binding('log', (argfns, env) => {
+    const vals = argfnstoargs(argfns, env)
     console.log(...vals)
     return vals.at(-1)
-  }),
-  binding('pair', (argsfn, env) => {
-    // const {subs} = jevko
-    // if (subs.length !== 2) throw Error(`pair arity error!`)
-    // const vals = evalargs(jevko, env)
-    const vals = argsfn(env)
-    return new Pair(vals[0], vals[1])
   }),
   binding('throw', () => {
     throw Error()
