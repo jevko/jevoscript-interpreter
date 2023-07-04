@@ -26,14 +26,21 @@ class Env {
 }
 
 class Aenv extends Env {
-  constructor(parent, bindings, isDeferred = false, top = null) {
+  constructor(parent, bindings, type = 'normal', top = null) {
     super(parent, bindings)
-    this.isDeferred = isDeferred
+    this.type = type
     // hacky
     this.top = top ?? parent.top
   }
   defer(fn) {
     this.top.deferred.push(fn)
+  }
+  // if this aenv has a parent which is a fn, returns the parent of that fn
+  // this is used to perform deferred checks for undefined variables to enable [mutually] recursive functions
+  getDeferParent() {
+    if (this.parent === null) return null
+    if (this.type === 'fn') return this.parent
+    return this.parent.getDeferParent()
   }
 }
 
@@ -96,7 +103,7 @@ const abind = (type) => (jevko, aenv) => {
   }
 }
 
-const topaenv = new Aenv(null, null, false, 'hack')
+const topaenv = new Aenv(null, null, 'top', 'hack')
 topaenv.bindings = new Map([
   abinding('true', true, 'const'),
   abinding('false', false, 'const'),
@@ -104,18 +111,18 @@ topaenv.bindings = new Map([
     const {subs, suffix} = jevko
     const params = []
     let body
+    const localaenv = new Aenv(aenv, null, 'fn')
     if (subs.length === 0) {
       // no params, body is {prefix: '', jevko}
       // body = {prefix: '', jevko}
-      body = analyzesuf(suffix, aenv)
+      body = analyzesuf(suffix, localaenv)
     }
     else if (subs.length === 1) {
       // no params, body is subs[0]
       // body = subs[0]
-      body = analyzesub(subs[0], aenv)
+      body = analyzesub(subs[0], localaenv)
     }
     else {
-      const localaenv = new Aenv(aenv, null, true)
       {
         // todo:
         const {jevko} = subs[0]
@@ -290,28 +297,54 @@ const analyzesub = (sub, aenv) => {
 
   if (found === undefined) {
     // checking for unknown variables at analysis-time that allows for [mutually] recursive functions by deferring the checks to the last stage of analysis
-    if (aenv.isDeferred) {
-      aenv.defer(() => {
-        const found = aenv.lookup(prefix)
+
+    const paenv = aenv.getDeferParent()
+    if (paenv !== null) {
+      paenv.defer(() => {
+        const e = paenv.lookupenv(prefix)
+
+        if (e === undefined) {
+          throw Error(`Unknown name: '${prefix}'`)
+        }
+
+        console.log(`Not sure if available at runtime: '${prefix}'`)
+        // if (e === aenv) throw Error(`Can't use before declaration: '${prefix}'`)
+        // todo: e must be outside of the fn that contains aenv
+
+        // also the fn that contains aenv must not be invoked before prefix is defined/created
+        // BUT: pretty sure that is IN GENERAL impossible to verify without running the program
+        // so to be correct we should return a special runtime fn that does the check also in runtime
+        // and we should warn that we're not sure if this is defined at runtime or not (show our reasoning that leads to us believing that it MAY be defined)
+        
+        // todo: check arity, etc.
+        const found = e.bindings.get(prefix)
+      })
+
+      const argfns = analyzeargs(jevko, aenv)
+      return env => {
+        const found = env.lookup(prefix)
+
         if (found === undefined) {
           throw Error(`Unknown name: '${prefix}'`)
         }
-        // todo: check arity, etc.
-      })
-      // note: assuming prefix refers to some value that is not yet visible
-      return makeInvocaton()
+
+        const {value} = found
+
+        return value(argfns, env)
+      }
     }
     else {
       throw Error(`Unknown name: '${prefix}'`)
     }
   }
-  // todo: check arity, etc.
 
   const {value, type} = found
   if (type === 'fn') {
     // note: break down a static construct
     return value(jevko, aenv)
   }
+
+  // todo: check arity, etc.
   
   return makeInvocaton()
 }
@@ -320,7 +353,8 @@ const analyzeargs = (jevko, aenv) => {
   const argfns = []
   const {subs, suffix} = jevko
   if (subs.length === 0) {
-    argfns.push(analyzesuf(suffix, aenv))
+    // note: empty suffix means fn invoked with 0 args
+    if (suffix !== '') argfns.push(analyzesuf(suffix, aenv))
   } else {
     for (const sub of subs) {
       argfns.push(analyzesub(sub, aenv))
@@ -363,28 +397,55 @@ const analyzesuf = (suf, aenv) => {
 
   // note: looking up in compile/analyze-time environment
   const found = aenv.lookup(suf)
-  if (found !== undefined) {
-    const {value, type} = found
-    // compile-time constants:
-    if (type === 'const') return env => value
-    // ?todo: could support CTFE
 
-    // runtime value:
-    return env => {
-      const {value} = env.lookup(suf)
-      return value 
-    }
-  }
-  // todo: option to defer this to allow for [mutually] recursive functions
   // note: analysis/compile-time checking of unbound variables
   //   aenv must keep track of local bindings
-  else {
-    console.error(aenv)
-    throw Error(`Unbound variable: ${suf}`)
+  if (found === undefined) {
+    // defer allows for [mutually] recursive functions
+    const paenv = aenv.getDeferParent()
+    if (paenv !== null) {
+      paenv.defer(() => {
+        const e = paenv.lookupenv(suf)
+
+        if (e === undefined) {
+          throw Error(`Unbound variable: ${suf}`)
+        }
+
+        console.log(`Not sure if available at runtime: '${suf}'`)
+        const found = e.bindings.get(suf)
+        // todo: analyze `found` further
+      })
+      // must do a runtime check, because the variable might be falsely identified as defined at analysis-time
+      return env => {
+        const found = env.lookup(suf)
+        if (found === undefined) {
+          throw Error(`Unbound variable: ${suf}`)
+        }
+        const {value} = found
+        return value 
+      }
+    }
+    else {
+      console.error(aenv)
+      throw Error(`Unbound variable: ${suf}`)
+    }
+  }
+  
+  const {value, type} = found
+  // compile-time constants:
+  if (type === 'const') return env => value
+  // ?todo: could support CTFE
+  // todo: analyze `found` further
+
+  // runtime value:
+  return env => {
+    const {value} = env.lookup(suf)
+    return value 
   }
 }
 
-const analyzesubs = (subs, aenv) => {
+const analyzesubs = (subs, aenv1) => {
+  const aenv = new Aenv(aenv1, null, 'block')
   const analyzed = []
 
   for (const sub of subs) {
@@ -461,7 +522,7 @@ export const evaltop = (jevko) => {
   }
 
   // analysis-time env:
-  const aenv = new Aenv(topaenv, undefined, false, aglobals)
+  const aenv = new Aenv(topaenv, undefined, 'top2', aglobals)
 
   // runtime env:
   const env = new Env(topenv)
