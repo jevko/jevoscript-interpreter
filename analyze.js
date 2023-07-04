@@ -250,21 +250,18 @@ topaenv.bindings = new Map([
       return vals[0] - vals[1]
     }
   }),
-  ['+', {
-    binding: 'const',
-    // note: + optimized at analyze-time
-    value: (jevko, aenv) => {
-      const argfns = analyzeargs(jevko, aenv)
-      if (argfns.length !== 2) throw Error('+ arity')
-      // todo: static type checking?
-      // would verify here that args are numbers
-      // aenv would contain type info
-      return (env) => {
-        const vals = argfnstoargs(argfns, env)
-        return vals[0] + vals[1]
-      }
-    },
-  }],
+  // note: + optimized at analyze-time
+  abinding('+', (jevko, aenv) => {
+    const argfns = analyzeargs(jevko, aenv)
+    if (argfns.length !== 2) throw Error('+ arity')
+    // todo: static type checking?
+    // would verify here that args are numbers
+    // aenv would contain type info
+    return (env) => {
+      const vals = argfnstoargs(argfns, env)
+      return vals[0] + vals[1]
+    }
+  }),
   // ['', '*unbound*'],
 ])
 
@@ -494,18 +491,6 @@ const argfnstoargs = (argfns, env) => {
 const topenv = new Env(null)
 topenv.bindings = new Map([
   // todo: check arity for +, =, -, etc. statically
-  binding('=', (argfns, env) => {
-    const vals = argfnstoargs(argfns, env)
-    return vals[0] === vals[1]
-  }),
-  binding('+', (argfns, env) => {
-    const vals = argfnstoargs(argfns, env)
-    return vals[0] + vals[1]
-  }),
-  binding('-', (argfns, env) => {
-    const vals = argfnstoargs(argfns, env)
-    return vals[0] - vals[1]
-  }),
   binding('log', (argfns, env) => {
     const vals = argfnstoargs(argfns, env)
     console.log(...vals)
