@@ -44,14 +44,6 @@ class Aenv extends Env {
   }
 }
 
-class Fn {
-  constructor(params, body, fnenv) {
-    this.params = params
-    this.body = body
-    this.fnenv = fnenv
-  }
-}
-
 class Tail {
   constructor(body, localenv) {
     this.body = body
@@ -59,12 +51,11 @@ class Tail {
   }
 }
 
-const abinding = (name, value, type = 'fn') => [name, {
+const abinding = (name, value, type = 'afn') => [name, {
   binding: 'const',
   value,
   type
 }]
-
 
 const abind = (type) => (jevko, aenv) => {
   const {subs} = jevko
@@ -74,32 +65,31 @@ const abind = (type) => (jevko, aenv) => {
   if (length < 2 || length % 2 !== 0) throw Error(`${type} arity error!`)
 
   const bs = []
-  let value
   for (let i = 0; i < length; i += 2) {
     const name = subtoname(subs[i])
 
     if (aenv.bindings.has(name)) throw Error(`${type} can't redeclare variable: ${name}`)
     
-    aenv.bindings.set(name, '*unbound*')
-    value = analyzesub(subs[i + 1], aenv)
-
-    const binding = {
+    const value = analyzesub(subs[i + 1], aenv)
+    
+    aenv.bindings.set(name, {
       binding: type,
-      value,
-    }
+      ...value,
+    })
 
-    aenv.bindings.set(name, binding)
-    bs.push([name, value])
+    bs.push([name, value.eval])
   }
 
-  return env => {
-    let v
-    for (const [name, value] of bs) {
-      v = evaltail(value(env))
-      env.bindings.set(name, {value: v})
+  return {
+    eval: env => {
+      let v
+      for (const [name, value] of bs) {
+        v = evaltail(value(env))
+        env.bindings.set(name, {value: v})
+      }
+      // return last value
+      return v
     }
-    // return last value
-    return v
   }
 }
 
@@ -115,12 +105,12 @@ topaenv.bindings = new Map([
     if (subs.length === 0) {
       // no params, body is {prefix: '', jevko}
       // body = {prefix: '', jevko}
-      body = analyzesuf(suffix, localaenv)
+      body = analyzesuf(suffix, localaenv).eval
     }
     else if (subs.length === 1) {
       // no params, body is subs[0]
       // body = subs[0]
-      body = analyzesub(subs[0], localaenv)
+      body = analyzesub(subs[0], localaenv).eval
     }
     else {
       {
@@ -145,7 +135,7 @@ topaenv.bindings = new Map([
         }
       }
       // body = analyzesubs(subs.slice(1), localaenv)
-      body = analyzesubs(subs.slice(1), localaenv)
+      body = analyzesubs(subs.slice(1), localaenv).eval
       
       // {prefix: '', jevko: {subs: subs.slice(1), suffix: ''}}
     }
@@ -153,22 +143,25 @@ topaenv.bindings = new Map([
 
     // todo: could ~return a fn object into aenv which will contain info about arity, so it can be checked at callsites
     
-    return (fnenv) => {
+    return {
+      type: 'fn',
+      params,
+      eval: (fnenv) => {
+        // return Fn(params, body, fnenv)
 
-      // return Fn(params, body, fnenv)
+        return (argfns, env) => {
+          const argvals = argfnstoargs(argfns, env)
+          // let's assume body is a single sub
+          // const {params, body, fnenv} = fn
+          // todo: move this check to static
+          if (params.length !== argvals.length) {
+            throw Error(`Arity error! Expected ${params.length}, got ${argvals.length}!`)
+          }
+          const args = bindparams(params, argvals)
+          const localenv = new Env(fnenv, args)
 
-      return (argfns, env) => {
-        const argvals = argfnstoargs(argfns, env)
-        // let's assume body is a single sub
-        // const {params, body, fnenv} = fn
-        // todo: move this check to static
-        if (params.length !== argvals.length) {
-          throw Error(`Arity error! Expected ${params.length}, got ${argvals.length}!`)
+          return new Tail(body, localenv)
         }
-        const args = bindparams(params, argvals)
-        const localenv = new Env(fnenv, args)
-  
-        return new Tail(body, localenv)
       }
     }
   }),
@@ -178,7 +171,7 @@ topaenv.bindings = new Map([
     const {subs} = jevko
     if (subs.length !== 2) throw Error(`set! arity error!`)
     const name = subtoname(subs[0])
-    const value = analyzesub(subs[1], aenv)
+    const value = analyzesub(subs[1], aenv).eval
 
     const e = aenv.lookupenv(name)
 
@@ -188,11 +181,13 @@ topaenv.bindings = new Map([
 
     if (binding.binding !== 'let') throw Error(`set! can't change variable: ${name}`)
 
-    return env => {
-      const e = env.lookupenv(name)
-      const binding = e.bindings.get(name)
-      binding.value = evaltail(value(env))
-      return value
+    return {
+      eval: env => {
+        const e = env.lookupenv(name)
+        const binding = e.bindings.get(name)
+        binding.value = evaltail(value(env))
+        return value
+      }
     }
   }),
   abinding('?', (jevko, aenv) => {
@@ -202,23 +197,25 @@ topaenv.bindings = new Map([
     const boundary = hasalt? subs.length - 1: subs.length
     const xs = []
     for (let i = 0; i < boundary; i += 2) {
-      const condval = analyzesub(subs[i], aenv)
+      const condval = analyzesub(subs[i], aenv).eval
       // console.log('ssss', subs.length, i + 1, subs[i + 1])
-      xs.push([condval, analyzesub(subs[i + 1], aenv)])
+      xs.push([condval, analyzesub(subs[i + 1], aenv).eval])
     }
     let alt
     if (hasalt) {
-      alt = analyzesub(subs.at(-1), aenv)
+      alt = analyzesub(subs.at(-1), aenv).eval
     }
     // note: let's say ? w/o alt returns ''
     // note: could optimize this by generating a version which returns '' instead of new Tail after for
     else alt = env => ''
 
-    return env => {
-      for (const [condf, conseqf] of xs) {
-        if (condf(env)) return new Tail(conseqf, env)
+    return {
+      eval: env => {
+        for (const [condf, conseqf] of xs) {
+          if (condf(env)) return new Tail(conseqf, env)
+        }
+        return new Tail(alt, env)
       }
-      return new Tail(alt, env)
     }
   }),
   abinding('', (jevko, aenv) => {
@@ -234,9 +231,11 @@ topaenv.bindings = new Map([
     // todo: static type checking?
     // would verify here that args are numbers
     // aenv would contain type info
-    return (env) => {
-      const vals = argfnstoargs(argfns, env)
-      return vals[0] === vals[1]
+    return {
+      eval: (env) => {
+        const vals = argfnstoargs(argfns, env)
+        return vals[0] === vals[1]
+      }
     }
   }),
   abinding('-', (jevko, aenv) => {
@@ -245,9 +244,11 @@ topaenv.bindings = new Map([
     // todo: static type checking?
     // would verify here that args are numbers
     // aenv would contain type info
-    return (env) => {
-      const vals = argfnstoargs(argfns, env)
-      return vals[0] - vals[1]
+    return {
+      eval: (env) => {
+        const vals = argfnstoargs(argfns, env)
+        return vals[0] - vals[1]
+      }
     }
   }),
   // note: + optimized at analyze-time
@@ -257,9 +258,11 @@ topaenv.bindings = new Map([
     // todo: static type checking?
     // would verify here that args are numbers
     // aenv would contain type info
-    return (env) => {
-      const vals = argfnstoargs(argfns, env)
-      return vals[0] + vals[1]
+    return {
+      eval: (env) => {
+        const vals = argfnstoargs(argfns, env)
+        return vals[0] + vals[1]
+      }
     }
   }),
   // ['', '*unbound*'],
@@ -280,17 +283,6 @@ const analyzesub = (sub, aenv) => {
   // todo: validate prefix
 
   const found = aenv.lookup(prefix)
-
-  const makeInvocaton = () => {
-    const argfns = analyzeargs(jevko, aenv)
-    return env => {
-      const found = env.lookup(prefix)
-
-      const {value} = found
-
-      return value(argfns, env)
-    }
-  }
 
   if (found === undefined) {
     // checking for unknown variables at analysis-time that allows for [mutually] recursive functions by deferring the checks to the last stage of analysis
@@ -315,19 +307,29 @@ const analyzesub = (sub, aenv) => {
         
         // todo: check arity, etc.
         const found = e.bindings.get(prefix)
+
+        if (found.type === 'fn') {
+          const {params} = found
+      
+          if (params.length !== argfns.length) {
+            throw Error('arity error')
+          }
+        }
       })
 
       const argfns = analyzeargs(jevko, aenv)
-      return env => {
-        const found = env.lookup(prefix)
+      return {
+        eval: env => {
+          const found = env.lookup(prefix)
 
-        if (found === undefined) {
-          throw Error(`Unknown name: '${prefix}'`)
+          if (found === undefined) {
+            throw Error(`Unknown name: '${prefix}'`)
+          }
+
+          const {value} = found
+
+          return value(argfns, env)
         }
-
-        const {value} = found
-
-        return value(argfns, env)
       }
     }
     else {
@@ -336,14 +338,30 @@ const analyzesub = (sub, aenv) => {
   }
 
   const {value, type} = found
-  if (type === 'fn') {
+  if (type === 'afn') {
     // note: break down a static construct
     return value(jevko, aenv)
   }
 
+  const argfns = analyzeargs(jevko, aenv)
+  if (type === 'fn') {
+    const {params} = found
+
+    if (params.length !== argfns.length) {
+      throw Error('arity error')
+    }
+  }
+
   // todo: check arity, etc.
-  
-  return makeInvocaton()
+  return {
+    eval: env => {
+      const found = env.lookup(prefix)
+
+      const {value} = found
+
+      return value(argfns, env)
+    }
+  }
 }
 
 const analyzeargs = (jevko, aenv) => {
@@ -351,10 +369,10 @@ const analyzeargs = (jevko, aenv) => {
   const {subs, suffix} = jevko
   if (subs.length === 0) {
     // note: empty suffix means fn invoked with 0 args
-    if (suffix !== '') argfns.push(analyzesuf(suffix, aenv))
+    if (suffix !== '') argfns.push(analyzesuf(suffix, aenv).eval)
   } else {
     for (const sub of subs) {
-      argfns.push(analyzesub(sub, aenv))
+      argfns.push(analyzesub(sub, aenv).eval)
     }
   }
   return argfns
@@ -378,15 +396,15 @@ const matchnum = (str) => {
 
 const analyzesuf = (suf, aenv) => {
   // let's say for now:
-  if (suf === '') return env => ''
+  if (suf === '') return {eval: env => ''}
   if (suf.startsWith("'")) {
-    if (suf.endsWith("'")) return env => suf.slice(1, -1)
-    return env => suf.slice(1)
+    if (suf.endsWith("'")) return {eval: env => suf.slice(1, -1)}
+    return {eval: env => suf.slice(1)}
   }
-  if (suf === 'NaN') return env => NaN
+  if (suf === 'NaN') return {eval: env => NaN}
   if (matchnum(suf)) {
     const num = Number(suf.replaceAll(/ |_/g, ''))
-    if (Number.isNaN(num) === false) return env => num
+    if (Number.isNaN(num) === false) return {eval: env => num}
     throw Error('got a bug')
   }
 
@@ -413,13 +431,15 @@ const analyzesuf = (suf, aenv) => {
         // todo: analyze `found` further
       })
       // must do a runtime check, because the variable might be falsely identified as defined at analysis-time
-      return env => {
-        const found = env.lookup(suf)
-        if (found === undefined) {
-          throw Error(`Unbound variable: ${suf}`)
+      return {
+        eval: env => {
+          const found = env.lookup(suf)
+          if (found === undefined) {
+            throw Error(`Unbound variable: ${suf}`)
+          }
+          const {value} = found
+          return value 
         }
-        const {value} = found
-        return value 
       }
     }
     else {
@@ -430,14 +450,16 @@ const analyzesuf = (suf, aenv) => {
   
   const {value, type} = found
   // compile-time constants:
-  if (type === 'const') return env => value
+  if (type === 'const') return {eval: env => value}
   // ?todo: could support CTFE
   // todo: analyze `found` further
 
   // runtime value:
-  return env => {
-    const {value} = env.lookup(suf)
-    return value 
+  return {
+    eval: env => {
+      const {value} = env.lookup(suf)
+      return value 
+    }
   }
 }
 
@@ -446,18 +468,20 @@ const analyzesubs = (subs, aenv1) => {
   const analyzed = []
 
   for (const sub of subs) {
-    analyzed.push(analyzesub(sub, aenv))
+    analyzed.push(analyzesub(sub, aenv).eval)
   }
 
-  return env => {
-    const localenv = new Env(env)
-    let v
-    for (let i = 0; i < analyzed.length - 1; ++i) {
-      const sub = analyzed[i]
-      v = evaltail(sub(localenv))
+  return {
+    eval: env => {
+      const localenv = new Env(env)
+      let v
+      for (let i = 0; i < analyzed.length - 1; ++i) {
+        const sub = analyzed[i]
+        v = evaltail(sub(localenv))
+      }
+      // console.log('>>>', subs.at(-1))
+      return new Tail(analyzed.at(-1), localenv)
     }
-    // console.log('>>>', subs.at(-1))
-    return new Tail(analyzed.at(-1), localenv)
   }
 }
 
@@ -518,7 +542,7 @@ export const evaltop = (jevko) => {
     const analyzed = analyzesuf(suffix, aenv)
     
     // run:
-    return analyzed(env)
+    return analyzed.eval(env)
   }
 
   const analyzed = analyzesubs(subs, aenv)
@@ -530,7 +554,7 @@ export const evaltop = (jevko) => {
   }
   
   // run:
-  const v = analyzed(env)
+  const v = analyzed.eval(env)
   // console.log('topv', v, v.body.toString())
   return evaltail(v)
   // return v.body(v.localenv)
