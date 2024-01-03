@@ -1,4 +1,3 @@
-import {parse} from './parse.js'
 import {evalstr} from './analyze.js'
 
 const src = `
@@ -36,20 +35,10 @@ let[
 ;log[fibiter[ [1] [0] [25] ]]
 ;fib[25]
 ;log['*****]
-even?[10001]
+;even?[[10001][1]]
+;even?[[10001]]
 ;even?[101]
+even?[2]
 `
-
-
-// console.log(parse('`hohoho`xyz'))
-// console.log(parse('sss`hohoho`sss'))
-// console.log(parse('sss``hohoho``sss'))
-// console.log(parse("sss`'hohoho'`sss"))
-// console.log(parse("sss``'hohoho'``sss"))
-// console.log(parse("sss``'hohoho`'``sss"))
-// console.log(parse("`   str   `"))
-// console.log(parse("special [`   str   `]"))
-// console.log(parse('sss`hohoho``sss'))
-// console.log('***\n', parse("'`hohoho``'"))
 
 console.log(evalstr(src))

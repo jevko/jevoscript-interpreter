@@ -110,6 +110,18 @@ const topaenv = new Aenv(null, null, 'top', 'hack')
 topaenv.bindings = new Map([
   abinding('true', true, 'const'),
   abinding('false', false, 'const'),
+  abinding('list', (jevko, aenv) => {
+    const {compiles, evals} = analyzeargs2(jevko, aenv)
+
+    return {
+      eval: (env) => {
+        return evals.map(e => evaltail(e(env)))
+      },
+      compile: (cenv) => {
+        return `[${compiles.map(c => `evaltail(${c(cenv)})`).join(',')}]`
+      }
+    }
+  }),
   abinding('fn', (jevko, aenv) => {
     const {subs, suffix} = jevko
     const params = []
@@ -189,6 +201,88 @@ topaenv.bindings = new Map([
       compile: (cenv) => {
         // todo: return new Tail only if body may continue indefinitely
         return `(${params.join(',')}) => {return new Tail(()=>${compilebody(cenv)})}`
+      }
+    }
+  }),
+  abinding('jsfn', (jevko, aenv) => {
+    const {subs, suffix} = jevko
+    const params = []
+    let body, compilebody
+    const localaenv = new Aenv(aenv, null, 'fn')
+    if (subs.length === 0) {
+      // no params, body is {prefix: '', jevko}
+      // body = {prefix: '', jevko}
+      const analyzed = analyzesuf(suffix, localaenv)
+      body = analyzed.eval
+      compilebody = analyzed.compile
+    }
+    else if (subs.length === 1) {
+      // no params, body is subs[0]
+      // body = subs[0]
+      const analyzed = analyzesub(subs[0], localaenv)
+      body = analyzed.eval
+      compilebody = analyzed.compile
+    }
+    else {
+      {
+        // todo:
+        const {jevko} = subs[0]
+        const {subs: ss, suffix} = jevko
+        // for now support only named params, no ..., etc.
+        if (ss.length === 0) {
+          params.push(suffix)
+          // bind argument:
+          localaenv.bindings.set(suffix, '*unbound*')
+        }
+        else for (const {prefix, jevko: {subs, suffix}} of ss) {
+          // todo
+          if (prefix !== '') throw Error('oops')
+          if (subs.length > 0) throw Error('oops')
+          // todo: validate suffix as id
+          if (params.includes(suffix)) throw Error('oops')
+          params.push(suffix)
+          // bind argument:
+          localaenv.bindings.set(suffix, '*unbound*')
+        }
+      }
+      
+      const analyzed = subs.length === 2? 
+        analyzesub(subs[1], localaenv): 
+        analyzesubs(subs.slice(1), localaenv)
+        
+      body = analyzed.eval
+      compilebody = analyzed.compile
+      
+      // {prefix: '', jevko: {subs: subs.slice(1), suffix: ''}}
+    }
+    // return new Fn(params, body, aenv)
+
+    // todo: could ~return a fn object into aenv which will contain info about arity, so it can be checked at callsites
+    
+    return {
+      type: 'fn',
+      params,
+      eval: (fnenv) => {
+        // return Fn(params, body, fnenv)
+
+        return (argfns, env) => {
+          const argvals = argfnstoargs(argfns, env)
+          // let's assume body is a single sub
+          // const {params, body, fnenv} = fn
+          // todo: move this check to static
+          if (params.length !== argvals.length) {
+            throw Error(`Arity error! Expected ${params.length}, got ${argvals.length}!`)
+          }
+          const args = bindparams(params, argvals)
+          const localenv = new Env(fnenv, args)
+
+          // todo: return new Tail only if body may continue indefinitely
+          return new Tail(body, localenv)
+        }
+      },
+      compile: (cenv) => {
+        // todo: return new Tail only if body may continue indefinitely
+        return `(${params.join(',')}) => {return ${compilebody(cenv)}}`
       }
     }
   }),
@@ -336,6 +430,61 @@ const subtoname = (sub) => {
 const analyzesub = (sub, aenv) => {
   const {prefix, jevko} = sub
 
+  if (prefix === '.') {
+    // we're doing $at[suffix]
+
+    const {subs, suffix} = jevko
+
+    // assuming we can only do single-argument indexing
+    if (subs.length !== 0) throw Error('oops')
+    // todo: allow only strings or numbers;
+    // future: may allow ranges and other types
+
+    const asuf = analyzesuf(suffix, aenv)
+    const evalsuf = asuf.eval
+
+    return {
+      eval: (env) => {
+        // note: this relies on @ always being in immediate scope to work correctly
+        // todo: tighten the edge case at the beginning of a block (and by extension at the beginning of the program)
+        const at = env.lookup('@')
+        // return at[evalsuf(env)]
+        let ret = at[evalsuf(env)]
+        if (typeof ret === 'function') ret = ret.bind(at)
+        return ret
+      },
+      compile: (cenv) => {
+        // return `${encodedAt}[evaltail(${asuf.compile(cenv)})]`
+        return `(()=>{
+          let $ = ${encodedAt}[evaltail(${asuf.compile(cenv)})]
+          if (typeof $ === 'function') $ = $.bind(${encodedAt})
+          return $
+        })()`
+      },
+    }
+  }
+  else if (prefix.startsWith('.')) {
+    const name = prefix.slice(1).trim()
+    // todo: analyze args
+    const {evals, compiles} = analyzeargs2(jevko, aenv)
+
+    // todo: like above, if returning a fn, bind it to @ first
+    return {
+      eval: (env) => {
+        // note: this relies on @ always being in immediate scope to work correctly
+        // todo: tighten the edge case at the beginning of a block (and by extension at the beginning of the program)
+        const at = env.lookup('@')
+        const args = evals.map(ae => ae(env))
+        return at[name](...args)
+      },
+      compile: (cenv) => {
+        // todo: evaltail only if necessary
+        const compiledargs = compiles.map(a => `evaltail(${a(cenv)})`)
+        return `${encodedAt}.${encodeid(name)}(${compiledargs.join(',')})`
+      },
+    }
+  }
+
   // todo: validate prefix
 
   const found = aenv.lookup(prefix)
@@ -384,10 +533,11 @@ const analyzesub = (sub, aenv) => {
 
           const {value} = found
 
+          // todo: either distinguish native javascript fns and jezyk fns or make jezyk fns strict
           return value(argfns, env)
         },
         compile: cenv => {
-          return `${prefix}(${compiles.map(c => `evaltail(${c(cenv)})`).join(',')})\n`
+          return `${encodeid(prefix)}(${compiles.map(c => `evaltail(${c(cenv)})`).join(',')})\n`
         }
       }
     }
@@ -418,11 +568,12 @@ const analyzesub = (sub, aenv) => {
 
       const {value} = found
 
+      // todo: either distinguish native javascript fns and jezyk fns or make jezyk fns strict
       return value(argfns, env)
     },
     compile: cenv => {
       // todo: evaltail only if necessary
-      return `${prefix}(${compiles.map(c => `evaltail(${c(cenv)})`).join(',')})\n`
+      return `${encodeid(prefix)}(${compiles.map(c => `evaltail(${c(cenv)})`).join(',')})\n`
     }
   }
 }
@@ -553,18 +704,47 @@ const analyzesuf = (suf, aenv) => {
       return value 
     },
     compile: cenv => {
-      return suf
+      return encodeid(suf)
     }
   }
 }
 
-const analyzesubs = (subs, aenv1) => {
-  const aenv = new Aenv(aenv1, null, 'block')
+export const encodeid = (id) => {
+  id = id.trim()
+  if (id === '') throw Error()
+  const iterator = id[Symbol.iterator]()
+  // const codepoints = [...id]
+  let ret = ''
+  {
+    /** @type {string} */
+    const c = iterator.next().value
+    // a-zA-Z$_
+    if ([...c.matchAll(/[a-zA-Z_]/g)].length === 0) {
+      ret += '$' + c.codePointAt(0).toString(36) + '$'
+    }
+    else ret += c
+  }
+  for (const c of iterator) {
+    // const c = id[i]
+    if ([...c.matchAll(/[a-zA-Z0-9_]/g)].length === 0) {
+      ret += '$' + c.codePointAt(0).toString(36) + '$'
+    }
+    else ret += c
+  }
+  return ret
+}
+
+const encodedAt = encodeid('@')
+const analyzesubs = (subs, aenv) => {
+  const localaenv = new Aenv(aenv, null, 'block')
   const analyzed = []
   const as = []
 
+  // todo:
+  localaenv.bindings.set('@', '*unbound*')
   for (const sub of subs) {
-    const a = analyzesub(sub, aenv)
+    const a = analyzesub(sub, localaenv)
+    localaenv.bindings.set('@', a)
     analyzed.push(a.eval)
     as.push(a)
   }
@@ -573,20 +753,23 @@ const analyzesubs = (subs, aenv1) => {
     eval: env => {
       const localenv = new Env(env)
       let v
+      // todo:
+      localenv.bindings.set('@', {value: undefined})
       for (let i = 0; i < analyzed.length - 1; ++i) {
         const sub = analyzed[i]
         v = evaltail(sub(localenv))
+        localenv.bindings.set('@', {value: v})
       }
       // console.log('>>>', subs.at(-1))
       return new Tail(analyzed.at(-1), localenv)
     },
     compile: cenv => {
-      let ret = '(()=>{'
+      let ret = `(()=>{let ${encodedAt};\n`
       for (let i = 0; i < as.length - 1; ++i) {
         const sub = as[i]
         // todo: don't evaltail statements, i.e. declarations
         if (sub.type === 'decl') ret += `${sub.compile(cenv)};\n`
-        else ret += `evaltail(${sub.compile(cenv)});\n`
+        else ret += `${encodedAt} = evaltail(${sub.compile(cenv)});\n`
       }
       // assuming last one is not a declaration
       // todo: checl
@@ -629,6 +812,9 @@ topenv.bindings = new Map([
     const vals = argfnstoargs(argfns, env)
     console.log(...vals)
     return vals.at(-1)
+  }),
+  binding('list', (argfns, env) => {
+    return argfnstoargs(argfns, env)
   }),
   binding('throw', () => {
     throw Error()
@@ -712,7 +898,7 @@ export const compiletop = (jevko) => {
 
   // compile-time env:
   // todo:
-  const cenv = {}
+  const cenv = topaenv
 
   const {subs, suffix} = jevko
 
@@ -737,7 +923,7 @@ export const compiletop = (jevko) => {
 
 const wrapcompiled = (str) => {
   return `${compileprelude}
-  evaltail(${str})`
+evaltail(${str})`
 }
 
 

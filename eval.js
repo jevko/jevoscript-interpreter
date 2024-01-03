@@ -39,10 +39,72 @@ class Tail {
   }
 }
 
+class SliceExpr {
+  constructor(a, b) {
+    this.a = a
+    this.b = b
+  }
+}
+
 class Pair {
   constructor(head, tail) {
     this.head = head
     this.tail = tail
+  }
+  eval(arg) {
+    if (typeof arg === 'number') {
+      if (arg === 0) return this.head
+      else if (this.tail instanceof Pair) return this.tail.eval(arg - 1)
+      else throw Error('oops')
+    }
+    if (typeof arg === 'string') {
+      if (arg === 'car') return this.head
+      if (arg === 'cdr') return this.tail
+
+      if (arg === 'head') return this.head
+      if (arg === 'tail') return this.tail
+
+      if (arg === 'first') return this.head
+      if (arg === 'second') return this.tail
+    }
+    if (arg instanceof SliceExpr) {
+      const a = arg.a ?? 0
+
+      // if (a === 0) {
+      //   const b =
+      // }
+      // else 
+      {
+        // assume a is a number
+        const sublist = this.sublistfrom(a)
+        if (arg.b === undefined) return sublist
+        // assume arg.b is a number
+        const b = arg.b - a
+
+        const items = []
+        let ptr = sublist
+        for (let i = 0; i < b; ++i) {
+          items.push(ptr.head)
+          // assuming tail is Pair
+          ptr = ptr.tail
+        }
+        let ret = null
+        for (let i = items.length - 1; i >= 0; --i) {
+          ret = new Pair(items[i], ret)
+        }
+        return ret
+      }
+    }
+
+    throw Error('oops 2')
+  }
+  sublistfrom(arg) {
+    if (typeof arg === 'number') {
+      if (arg === 0) return this
+      else if (this.tail instanceof Pair) return this.tail.sublistfrom(arg - 1)
+      else throw Error('oops')
+    }
+    throw Error('oops')
   }
 }
 
